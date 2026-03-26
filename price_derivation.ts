@@ -235,7 +235,6 @@ export async function fetchNAV(connection: Connection, dTokenMintStr: string) {
     // Use RPC data for NAV calculation
     const { constituentVaults, dTokenSupply } = rpcData;
 
-
     // 6. Demonstrate NAV / Price Calculation
     console.log("--- Pseudo-NAV Calculation ---");
     let totalBasketNAV = 0;
@@ -244,12 +243,16 @@ export async function fetchNAV(connection: Connection, dTokenMintStr: string) {
     const mintStr = constituentVaults.map(v => v.mint.toBase58()).join(",");
     // Note: Jupiter V3 now strictly regulates rate limits/auth. Add { headers: { 'x-api-key': 'YOUR_KEY' } } if you have one.
     const fetchOptions: any = JUP_API_KEY ? { headers: { 'x-api-key': JUP_API_KEY } } : {};
-    const priceResponse = await (globalThis as any).fetch(`https://api.jup.ag/price/v3?ids=${mintStr}`, fetchOptions);
+    const priceResponse = await fetch(`https://api.jup.ag/price/v3?ids=${mintStr}`, fetchOptions);
     const priceData = await priceResponse.json();
 
     for (const vault of constituentVaults) {
         const mintId = vault.mint.toBase58();
         const livePriceStr = priceData?.[mintId]?.usdPrice;
+        if (!livePriceStr || isNaN(parseFloat(livePriceStr))) {
+            console.warn(`  No price available for ${mintId}, skipping`);
+            continue;
+        }
         const liveOraclePrice = parseFloat(livePriceStr);
 
         const valueUsd = vault.balance * liveOraclePrice;
@@ -263,9 +266,10 @@ export async function fetchNAV(connection: Connection, dTokenMintStr: string) {
 }
 
 // Ensure proper execution
-const isMain = typeof require !== 'undefined' && require.main === module || (typeof process !== 'undefined' && process.argv[1]?.endsWith('example.ts'));
+const isMain = typeof require !== 'undefined' && require.main === module || (typeof process !== 'undefined' && process.argv[1]?.endsWith('price_derivation.ts'));
 if (isMain) {
-    const connection = new Connection("https://api.mainnet-beta.solana.com");
+    const RPC_URL = process.env.RPC_URL ?? "https://api.mainnet-beta.solana.com";
+    const connection = new Connection(RPC_URL);
 
     (async () => {
         try {
