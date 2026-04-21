@@ -25,7 +25,7 @@ dotenv.config({ path: ".env" });
 // ---------------------------------------------------------------------------
 // Configuration — set these in your .env file
 // ---------------------------------------------------------------------------
-const API_BASE_URL = process.env.API_BASE_URL ?? "https://dev-api.diversifi.trade";
+const API_BASE_URL = process.env.API_BASE_URL ?? "https://api.diversifi.trade";
 const API_KEY = process.env.DIVERSIFI_API_KEY ?? "";  // dfi_... with 'integrations' permission
 const RPC_URL = process.env.RPC_URL ?? "https://api.mainnet-beta.solana.com";
 
