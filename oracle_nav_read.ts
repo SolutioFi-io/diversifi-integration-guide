@@ -1,14 +1,14 @@
 /**
- * oracle_nav_read.ts — companion to README §8.
+ * oracle_nav_read.ts — companion to README #8.
  *
  * Demonstrates two ways to consume the on-chain dToken NAV from a Switchboard
  * On-Demand canonical OracleQuote account:
  *
- *   1. Passive read (§8.3) — single getAccountInfo, no Switchboard SDK required.
+ *   1. Passive read (#8.3) — single getAccountInfo, no Switchboard SDK required.
  *      Returns whatever value the canonical account holds at read time
  *      (≤15 min stale under the DiversiFi keeper SLA).
  *
- *   2. Atomic crank (§8.4) — request a fresh oracle attestation and consume it
+ *   2. Atomic crank (#8.4) — request a fresh oracle attestation and consume it
  *      in the same transaction. Requires @switchboard-xyz/on-demand and
  *      @switchboard-xyz/common. Demonstrates the simulate-only flow here so the
  *      example doesn't actually spend SOL; integrators who use this in

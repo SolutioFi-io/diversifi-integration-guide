@@ -218,7 +218,7 @@ See the provided `price_derivation.ts` script in this repository for a complete 
 
 For baskets that have a published Switchboard On-Demand NAV feed, the simplest read path is to fetch a single canonical on-chain account and decode 16 bytes. No constituent math, no off-chain price source, no SDK dependency required for the read path.
 
-Use this section if you want a single up-to-date NAV value for a dToken. If you need the underlying constituent breakdown, see Sections 1–7. If you need atomic freshness inside your own swap / quote transaction, see §8.4.
+Use this section if you want a single up-to-date NAV value for a dToken. If you need the underlying constituent breakdown, see Sections 1–7. If you need atomic freshness inside your own swap / quote transaction, see #8.4.
 
 ### 8.1 Mechanics
 
@@ -291,7 +291,7 @@ The same pattern works in Rust, Python, or any client that can fetch a Solana ac
 
 ### 8.4 Atomic-crank pattern (for trade execution)
 
-The default-read pattern (§8.3) returns whatever value the account holds at read time. DiversiFi runs a low-cadence keeper that refreshes the account roughly every 15 minutes, so passive reads see a value that is at most ~15 minutes stale.
+The default-read pattern (#8.3) returns whatever value the account holds at read time. DiversiFi runs a low-cadence keeper that refreshes the account roughly every 15 minutes, so passive reads see a value that is at most ~15 minutes stale.
 
 If your use case can't tolerate that staleness — e.g. you're quoting a swap or routing through a dToken in your own AMM — include a "crank" in the same transaction that consumes the value. The on-chain quote account will be updated atomically with whatever else your tx does:
 
@@ -337,26 +337,26 @@ The CU footprint is negligible. Tx-bytes can matter if you're already near the 1
 
 | Mode | Guarantee |
 |---|---|
-| Passive read (§8.3) | ≤ 15 minutes stale (DiversiFi keeper cadence; subject to change — contact us if you need a tighter SLA) |
-| Atomic crank (§8.4) | Zero staleness — value is signed by the oracle within the same tx |
+| Passive read (#8.3) | ≤ 15 minutes stale (DiversiFi keeper cadence; subject to change — contact us if you need a tighter SLA) |
+| Atomic crank (#8.4) | Zero staleness — value is signed by the oracle within the same tx |
 
 ### 8.6 When to use which
 
 | Your use case | Recommendation |
 |---|---|
-| Dashboards, indexers, analytics | §8.3 — passive read, no SDK dep, ≤15 min freshness |
-| AMM / orderbook / routing / arbitrage where stale NAV is exploitable | §8.4 — atomic crank in your tx |
+| Dashboards, indexers, analytics | #8.3 — passive read, no SDK dep, ≤15 min freshness |
+| AMM / orderbook / routing / arbitrage where stale NAV is exploitable | #8.4 — atomic crank in your tx |
 | You need per-constituent token breakdowns or to avoid trusting a published NAV | Sections 1–7 — manual computation from on-chain state |
 
 ### 8.7 Error handling
 
 - `accountInfo === null` — the canonical account has not yet been bootstrapped on-chain. The basket may not have a feed yet, or the first crank hasn't fired. Contact DiversiFi.
 - `accountInfo.data.indexOf(feedHashBytes) === -1` — the `feedId` you used does not match what's stored in this account. Double-check the `feedId`.
-- `fetchManagedUpdateIxs` throws — the Switchboard gateway is transiently unavailable, the feed is mis-configured, or the oracle subnet can't execute the underlying job. Retry once; if it persists, fall back to §8.3 or contact DiversiFi.
+- `fetchManagedUpdateIxs` throws — the Switchboard gateway is transiently unavailable, the feed is mis-configured, or the oracle subnet can't execute the underlying job. Retry once; if it persists, fall back to #8.3 or contact DiversiFi.
 
 ### 8.8 Example TypeScript Implementation
 
-See `oracle_nav_read.ts` in this repository for a runnable example covering both the passive read (§8.3) and the atomic-crank pattern (§8.4):
+See `oracle_nav_read.ts` in this repository for a runnable example covering both the passive read (#8.3) and the atomic-crank pattern (#8.4):
 
 ```bash
 npx tsx oracle_nav_read.ts
