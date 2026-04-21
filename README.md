@@ -2,15 +2,23 @@
 
 This guide covers three integration paths for third-party platforms:
 
-- **On-chain pricing** (Sections 1–7): Read real-time NAV and dToken prices directly from the Solana blockchain — no API key required.
-- **Deposits & withdrawals** (Sections 8–13): Execute deposits and withdrawals on behalf of a single authenticated wallet via the DiversiFi API.
-- **Platform integration** (Sections 14–18): Manage deposits, withdrawals, and refunds for multiple end users from a single API key — designed for platforms that want to embed DiversiFi without exposing credentials to users.
+- **On-chain pricing** (Sections 1–8): Read real-time NAV and dToken prices directly from the Solana blockchain — no API key required.
+- **Deposits & withdrawals** (Sections 9–14): Execute deposits and withdrawals on behalf of a single authenticated wallet via the DiversiFi API.
+- **Platform integration** (Sections 15–19): Manage deposits, withdrawals, and refunds for multiple end users from a single API key — designed for platforms that want to embed DiversiFi without exposing credentials to users.
 
 ---
 
 ## On-Chain Pricing Overview
 
-A dToken (e.g., dBLUE) represents a programmable, self-custodial basket of underlying assets on Solana. To calculate the real-time net asset value (NAV) and price of a dToken, integrator platforms need to:
+A dToken (e.g., dBLUE) represents a programmable, self-custodial basket of underlying assets on Solana. There are two ways to obtain the real-time NAV / price of a dToken:
+
+**A. Read NAV directly from a Switchboard on-chain oracle account (Section 8).** For baskets that have an oracle feed published, this is a single `getAccountInfo` call — no constituent math, no off-chain price source, no API key. Recommended for most integrators.
+
+**B. Calculate NAV yourself from on-chain state (Sections 1–7).** Lower-level path: derive vault accounts, fetch balances, multiply by your own price source, divide by supply. Use this if you need per-constituent breakdowns, if a basket doesn't yet have a published oracle feed, or if you want full control over the pricing source.
+
+The manual-calculation flow (Sections 1–7) is laid out first because it's universally applicable to every dToken; the oracle-account flow (Section 8) is presented after it as the recommended quick path.
+
+To calculate NAV manually, integrator platforms need to:
 1. Identify if a single token is a DiversiFi dToken (via PDA derivation).
 2. Or, retrieve a list of all active dTokens directly from the network.
 3. Parse the active basket constituents (mints).
@@ -206,7 +214,163 @@ See the provided `price_derivation.ts` script in this repository for a complete 
 
 ---
 
-## 8. Authentication
+## 8. Reading NAV from a Switchboard On-Chain Oracle Account
+
+For baskets that have a published Switchboard On-Demand NAV feed, the simplest read path is to fetch a single canonical on-chain account and decode 16 bytes. No constituent math, no off-chain price source, no SDK dependency required for the read path.
+
+Use this section if you want a single up-to-date NAV value for a dToken. If you need the underlying constituent breakdown, see Sections 1–7. If you need atomic freshness inside your own swap / quote transaction, see §8.4.
+
+### 8.1 Mechanics
+
+The on-chain account is a "canonical OracleQuote" — its address is deterministic from `(queue_pubkey, feed_id)`. There is no registry to query; once you know the `feed_id` for a basket, you can derive the account address client-side and read from it.
+
+Account data layout (the slice you care about):
+
+```
+┌─ 32 bytes ─┐┌─── 16 bytes ───┐┌── 1 byte ──┐
+│  feedHash  ││ value (LE u128)││ minSamples │
+└────────────┘└────────────────┘└────────────┘
+```
+
+The `value` is fixed-point with 18 decimal places. Divide by `1e18` to get USD per dToken LP token.
+
+### 8.2 Constants
+
+| Item | Value |
+|------|-------|
+| Switchboard On-Demand mainnet program | exposed as `ON_DEMAND_MAINNET_PID` from `@switchboard-xyz/on-demand` |
+| Mainnet queue | `A43DyUGA7s8eXPxqEjJY6EBu1KKbNgfxF8h17VAHn13w` |
+| Switchboard quote program | `orac1eFjzWL5R3RbbdMV68K9H6TaCVVcL6LjvQQWAbz` |
+
+Live NAV feeds (canonical quote account = `OracleQuote.getCanonicalPubkey(queue, [feedId])`):
+
+| Basket | `feedId` (V2) | Canonical quote account |
+|---|---|---|
+| dBONK | `0x9a5cfb9568ca6c9eeb9833ea0fbfb2a9e163f50d78fad56411010d386ea0c19f` | `FjzDEtknQEfiN4cgynvXFeukH9DNEHTc7YFFchtRP1vP` |
+| dYIELD | `0x9f83c3e1f4f26a0c2646cd79cb9be1246b04552153b7170dd3e8ed4330d1d7d4` | `J3UmBcrkysdptEYVBWuC6WGwcycafpTTzb9N6q3iHJMz` |
+| dBIG4 *(stored as `dMULTI` in DB)* | `0x4484de63de1cc245b30467d5f3b28781eea4df1557d6a18909c55117e3a17969` | `5QPMhXYAVm4bHY9NsdyU2Zi4gbbJN3UrVSzAD6tEKq3K` |
+| dBOOMER | `0xde956aa58cfb0b01d5b11a8f0b555a1b3437b281f1efa50c250a43a29390dc9e` | `BLPfd4E6ZcCVpv5a6yA9tZQPrwfkkhWyqpAoV6Vjxezj` |
+
+For baskets not listed above, contact DiversiFi for the current `feedId`; a public registry endpoint is on the roadmap. Note: the user-facing dBIG4 basket is stored under the symbol `dMULTI` in the DiversiFi DB, but the on-chain feed and quote account use the same canonical layout as every other basket — the symbol divergence is purely a metadata concern.
+
+### 8.3 Read pattern (TypeScript, no Switchboard SDK required)
+
+```typescript
+import { Connection, PublicKey } from "@solana/web3.js";
+
+const QUEUE = new PublicKey("A43DyUGA7s8eXPxqEjJY6EBu1KKbNgfxF8h17VAHn13w");
+const QUOTE_PROGRAM_ID = new PublicKey("orac1eFjzWL5R3RbbdMV68K9H6TaCVVcL6LjvQQWAbz");
+const DBONK_FEED_ID = "0x9a5cfb9568ca6c9eeb9833ea0fbfb2a9e163f50d78fad56411010d386ea0c19f";
+
+// Derive the canonical quote account address.
+// Seeds: queue.toBytes() ++ feedHash bytes (32 bytes per feedId).
+const feedHashBytes = Buffer.from(DBONK_FEED_ID.replace(/^0x/, ""), "hex");
+const [quoteAccount] = PublicKey.findProgramAddressSync(
+    [Buffer.from(QUEUE.toBytes()), feedHashBytes],
+    QUOTE_PROGRAM_ID
+);
+
+const accountInfo = await connection.getAccountInfo(quoteAccount, "confirmed");
+if (!accountInfo?.data) {
+    throw new Error("Quote account not yet bootstrapped — feed may be new or contact DiversiFi");
+}
+
+// Locate the feedHash bytes in the account data; the value follows.
+const idx = accountInfo.data.indexOf(feedHashBytes);
+if (idx === -1) throw new Error("feedId not found in account data");
+
+let value = 0n;
+for (let j = 0; j < 16; j++) {
+    value |= BigInt(accountInfo.data[idx + 32 + j]) << (BigInt(j) * 8n);
+}
+const navUsd = Number(value) / 1e18;
+console.log(`dBONK NAV: $${navUsd}`);
+```
+
+The same pattern works in Rust, Python, or any client that can fetch a Solana account — only the BigInt arithmetic and PDA derivation API differ by language. The Switchboard SDK exposes the equivalent of `findProgramAddressSync(...)` as `OracleQuote.getCanonicalPubkey(queue, [feedId])` if you prefer to add the dependency.
+
+### 8.4 Atomic-crank pattern (for trade execution)
+
+The default-read pattern (§8.3) returns whatever value the account holds at read time. DiversiFi runs a low-cadence keeper that refreshes the account roughly every 15 minutes, so passive reads see a value that is at most ~15 minutes stale.
+
+If your use case can't tolerate that staleness — e.g. you're quoting a swap or routing through a dToken in your own AMM — include a "crank" in the same transaction that consumes the value. The on-chain quote account will be updated atomically with whatever else your tx does:
+
+```typescript
+import { CrossbarClient } from "@switchboard-xyz/common";
+import { Queue, AnchorUtils, ON_DEMAND_MAINNET_PID } from "@switchboard-xyz/on-demand";
+
+const program = await AnchorUtils.loadProgramFromConnection(
+    connection,
+    undefined as any,
+    ON_DEMAND_MAINNET_PID
+);
+const queue = await Queue.loadDefault(program);
+const crossbar = new CrossbarClient("https://crossbar.switchboard.xyz");
+
+// Two instructions: Ed25519 verification + canonical-account update.
+const updateIxs = await queue.fetchManagedUpdateIxs(
+    crossbar,
+    [DBONK_FEED_ID],
+    { payer: payerPubkey }
+);
+
+// Prepend to your own tx.
+const tx = new Transaction()
+    .add(...updateIxs)
+    .add(yourOwnInstruction);
+```
+
+After this transaction confirms, `OracleQuote` holds the value the oracle just signed, and your instruction consumed exactly that value.
+
+Cost & footprint per atomic crank:
+
+| Metric | Value | Notes |
+|---|---|---|
+| Tx fee added | 10,000 lamports | Standard 5,000-lamport base × 2 (signature + Ed25519 precompile) |
+| Compute units added | ~628 | Ed25519 runs as a native precompile, doesn't count |
+| Tx-bytes added | ~330 | Ed25519 ix data + quote-program ix data |
+| Latency added | ~2–5 s | Switchboard gateway round-trip during `fetchManagedUpdateIxs` |
+
+The CU footprint is negligible. Tx-bytes can matter if you're already near the 1232-byte legacy tx limit — use a v0 transaction with lookup tables in that case.
+
+### 8.5 Freshness guarantees
+
+| Mode | Guarantee |
+|---|---|
+| Passive read (§8.3) | ≤ 15 minutes stale (DiversiFi keeper cadence; subject to change — contact us if you need a tighter SLA) |
+| Atomic crank (§8.4) | Zero staleness — value is signed by the oracle within the same tx |
+
+### 8.6 When to use which
+
+| Your use case | Recommendation |
+|---|---|
+| Dashboards, indexers, analytics | §8.3 — passive read, no SDK dep, ≤15 min freshness |
+| AMM / orderbook / routing / arbitrage where stale NAV is exploitable | §8.4 — atomic crank in your tx |
+| You need per-constituent token breakdowns or to avoid trusting a published NAV | Sections 1–7 — manual computation from on-chain state |
+
+### 8.7 Error handling
+
+- `accountInfo === null` — the canonical account has not yet been bootstrapped on-chain. The basket may not have a feed yet, or the first crank hasn't fired. Contact DiversiFi.
+- `accountInfo.data.indexOf(feedHashBytes) === -1` — the `feedId` you used does not match what's stored in this account. Double-check the `feedId`.
+- `fetchManagedUpdateIxs` throws — the Switchboard gateway is transiently unavailable, the feed is mis-configured, or the oracle subnet can't execute the underlying job. Retry once; if it persists, fall back to §8.3 or contact DiversiFi.
+
+### 8.8 Example TypeScript Implementation
+
+See `oracle_nav_read.ts` in this repository for a runnable example covering both the passive read (§8.3) and the atomic-crank pattern (§8.4):
+
+```bash
+npx tsx oracle_nav_read.ts
+```
+
+The passive read works with the base dependencies of this repo. The atomic-crank demo additionally requires the Switchboard SDK packages — install them only if you need that path:
+
+```bash
+pnpm add @switchboard-xyz/on-demand @switchboard-xyz/common
+```
+
+---
+
+## 9. Authentication
 
 All deposit and withdrawal operations go through the DiversiFi API. You will need an API key to interact with these endpoints.
 
@@ -222,7 +386,7 @@ Authorization: Bearer dfi_your_api_key_here
 
 ---
 
-## 9. Deposit Flow
+## 10. Deposit Flow
 
 Depositing USDC into a basket is a two-step process:
 
@@ -286,7 +450,7 @@ Once confirmed, the DiversiFi backend automatically executes the Jupiter swaps a
 
 ---
 
-## 10. Withdrawal Flow
+## 11. Withdrawal Flow
 
 Withdrawing converts LP tokens back to USDC. Same two-step pattern as deposits.
 
@@ -318,7 +482,7 @@ After confirmation, the backend swaps each constituent token back to USDC. Fees 
 
 ---
 
-## 11. Cancelling Pending Operations
+## 12. Cancelling Pending Operations
 
 If a deposit or withdrawal is stuck, users can cancel and reclaim their locked tokens.
 
@@ -386,7 +550,7 @@ Only the unprocessed portion of a deposit/withdrawal is refunded. If the backend
 
 ---
 
-## 12. Reading Positions and History
+## 13. Reading Positions and History
 
 These endpoints require only `read_only` permission.
 
@@ -421,17 +585,17 @@ Each transaction includes its type (`Deposit`, `Withdrawal`, `Refund`), status (
 
 ---
 
-## 13. Example TypeScript Implementation
+## 14. Example TypeScript Implementation
 
 See `deposit_withdraw_example.ts` for a complete working example of the deposit and withdrawal flows using the API.
 
 ---
 
-## 14. Platform Integration Overview
+## 15. Platform Integration Overview
 
 The platform integration API (`/v1/integrations/`) is designed for third-party platforms that want to embed DiversiFi deposits and withdrawals for their own end users without requiring each user to authenticate directly with DiversiFi.
 
-**Key difference from Sections 8–13:** The standard `/v1/positions/` endpoints act on behalf of the authenticated wallet. The `/v1/integrations/` endpoints let your platform specify any `user_wallet` address, so a single API key can serve many users.
+**Key difference from Sections 9–14:** The standard `/v1/positions/` endpoints act on behalf of the authenticated wallet. The `/v1/integrations/` endpoints let your platform specify any `user_wallet` address, so a single API key can serve many users.
 
 ### How it works
 
@@ -456,7 +620,7 @@ Authorization: Bearer dfi_your_api_key_here
 
 ---
 
-## 15. Platform Deposit Flow
+## 16. Platform Deposit Flow
 
 ### Get the unsigned deposit transaction
 
@@ -528,13 +692,13 @@ Content-Type: application/json
 }
 ```
 
-The `transactionGroupId` is a 16-character hex ID you use to poll status (Section 18). It is also deterministic — computed as `sha256(signature).slice(0, 16)` — so you can derive it locally, but the confirm response is the canonical source.
+The `transactionGroupId` is a 16-character hex ID you use to poll status (Section 19). It is also deterministic — computed as `sha256(signature).slice(0, 16)` — so you can derive it locally, but the confirm response is the canonical source.
 
 > **Why is the confirm step required?** It links the on-chain transaction to your API key so that only your key can retrieve it via `/transaction/:id`. Without it, the transaction processes normally but will not be visible through the integrations API.
 
 ---
 
-## 16. Platform Withdrawal Flow
+## 17. Platform Withdrawal Flow
 
 ### Get the unsigned withdrawal transaction
 
@@ -550,11 +714,11 @@ GET /v1/integrations/withdraw/tx
 
 **Response:** Same shape as the deposit response — `unsignedTxs` array and a `confirmToken`.
 
-The user signs and submits the transaction. Then call `POST /v1/integrations/confirm` with the signature and `confirmToken`, exactly as in Section 15. The confirm response returns the `transactionGroupId` for polling.
+The user signs and submits the transaction. Then call `POST /v1/integrations/confirm` with the signature and `confirmToken`, exactly as in Section 16. The confirm response returns the `transactionGroupId` for polling.
 
 ---
 
-## 17. Platform Refund Flow
+## 18. Platform Refund Flow
 
 If a deposit or withdrawal is stuck — for example, if a swap failed and tokens are locked in the user's on-chain escrow account — the platform can initiate a refund on behalf of the user.
 
@@ -621,13 +785,13 @@ The user signs and submits the refund transaction. No confirm step is required f
 
 ---
 
-## 18. Tracking Transaction Status
+## 19. Tracking Transaction Status
 
 ```
 GET /v1/integrations/transaction/:transactionGroupId
 ```
 
-Use the `transactionGroupId` returned by `POST /confirm` (Sections 15–16) or derived locally from a refund signature (Section 17) to poll status. You can only look up transactions that were confirmed with your own API key.
+Use the `transactionGroupId` returned by `POST /confirm` (Sections 16–17) or derived locally from a refund signature (Section 18) to poll status. You can only look up transactions that were confirmed with your own API key.
 
 **States:**
 
@@ -685,7 +849,7 @@ Use the `transactionGroupId` returned by `POST /confirm` (Sections 15–16) or d
 }
 ```
 
-**Note:** All token amounts are in atomic units (smallest denomination). Divide by `10^decimals` to get human-readable values. USDC uses 6 decimals; dToken decimals can be read from the mint account (byte offset 44, as shown in Section 4).
+**Note:** All token amounts are in atomic units (smallest denomination). Divide by `10^decimals` to get human-readable values. USDC uses 6 decimals; dToken decimals can be read from the mint account (byte offset 44, as shown in Section 4 for the manual calculation path).
 
 **Error responses:**
 
@@ -696,7 +860,7 @@ Use the `transactionGroupId` returned by `POST /confirm` (Sections 15–16) or d
 
 ---
 
-## 19. Example TypeScript Implementation
+## 20. Example TypeScript Implementation
 
 See `platform_integration_example.ts` for a complete working example covering all four operations: deposit, withdrawal, refund, and status polling.
 
@@ -706,8 +870,8 @@ npx tsx platform_integration_example.ts
 
 **.env required:**
 ```
-API_BASE_URL=https://dev-api.diversifi.trade
-DIVERSIFI_API_KEY=dfi_...          # must have 'integrations' permission
+API_BASE_URL=https://api.diversifi.trade   # or https://staging-api.diversifi.trade for staging
+DIVERSIFI_API_KEY=dfi_...                  # must have 'integrations' permission
 RPC_URL=https://...
-USER_SECRET_KEY=[1,2,3,...]        # 64-byte keypair as JSON array (simulates the user's wallet)
+USER_SECRET_KEY=[1,2,3,...]                # 64-byte keypair as JSON array (simulates the user's wallet)
 ```
