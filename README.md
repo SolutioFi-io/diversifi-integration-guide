@@ -12,11 +12,11 @@ This guide covers three integration paths for third-party platforms:
 
 A dToken (e.g., dBLUE) represents a programmable, self-custodial basket of underlying assets on Solana. There are two ways to obtain the real-time NAV / price of a dToken:
 
-**A. Read NAV directly from a Switchboard on-chain oracle account (Section 8).** For baskets that have an oracle feed published, this is a single `getAccountInfo` call — no constituent math, no off-chain price source, no API key. Recommended for most integrators.
+**A. Read NAV directly from a Switchboard on-chain oracle account (Section 8).** Once a basket has a published NAV feed, this is a single `getAccountInfo` call with no constituent math. No basket has a published feed at the moment (Section 8.2), so use B for now.
 
 **B. Calculate NAV yourself from on-chain state (Sections 1–7).** Lower-level path: derive vault accounts, fetch balances, multiply by your own price source, divide by supply. Use this if you need per-constituent breakdowns, if a basket doesn't yet have a published oracle feed, or if you want full control over the pricing source.
 
-The manual-calculation flow (Sections 1–7) is laid out first because it's universally applicable to every dToken; the oracle-account flow (Section 8) is presented after it as the recommended quick path.
+The manual-calculation flow (Sections 1–7) is laid out first because it's universally applicable to every dToken; the oracle-account flow (Section 8) is presented after it as the quick path for baskets with a published feed.
 
 To calculate NAV manually, integrator platforms need to:
 1. Identify if a single token is a DiversiFi dToken (via PDA derivation).
@@ -216,84 +216,93 @@ See the provided `price_derivation.ts` script in this repository for a complete 
 
 ## 8. Reading NAV from a Switchboard On-Chain Oracle Account
 
-For baskets that have a published Switchboard On-Demand NAV feed, the simplest read path is to fetch a single canonical on-chain account and decode 16 bytes. No constituent math, no off-chain price source, no SDK dependency required for the read path.
+> **No basket currently has a published NAV feed.** The four feeds this section used to list (dBONK, dYIELD, dBIG4 and dBOOMER) were retired and have not been refreshed for months, so their accounts hold stale values. Do not read them. DiversiFi is moving to one feed per basket whose address stays the same when the basket's composition changes, and will list each feed in Section 8.2 once it is live. Until then, compute NAV from on-chain state (Sections 1-7).
 
-Use this section if you want a single up-to-date NAV value for a dToken. If you need the underlying constituent breakdown, see Sections 1–7. If you need atomic freshness inside your own swap / quote transaction, see §8.4.
+A canonical OracleQuote account keeps its last value until someone refreshes it. Whatever feed you read, check how old the value is before you use it (Section 8.3).
+
+For a basket with a published feed, the read is one `getAccountInfo` call on a single account: no constituent math, no off-chain price source and no SDK. If you need a value produced for your own transaction, see Section 8.4.
 
 ### 8.1 Mechanics
 
-The on-chain account is a "canonical OracleQuote" — its address is deterministic from `(queue_pubkey, feed_id)`. There is no registry to query; once you know the `feed_id` for a basket, you can derive the account address client-side and read from it.
+The on-chain account is a "canonical OracleQuote". Its address is deterministic from `(queue_pubkey, feed_id)`, so once you know a basket's `feed_id` you can derive the account address client-side.
 
-Account data layout (the slice you care about):
+Account data layout:
 
 ```
-┌─ 32 bytes ─┐┌─── 16 bytes ───┐┌── 1 byte ──┐
-│  feedHash  ││ value (LE u128)││ minSamples │
-└────────────┘└────────────────┘└────────────┘
+[8 bytes "SBOracle"][32 bytes queue][u16 LE quote length][quote bytes][zero padding]
+
+quote bytes, per feed:  [32 bytes feedHash][16 bytes value, LE u128][1 byte minSamples]
+quote bytes end with:   [8 bytes recent_slot, LE u64][1 byte version][4 bytes "SBOD"]
 ```
 
-The `value` is fixed-point with 18 decimal places. Divide by `1e18` to get USD per dToken LP token.
+`value` is fixed-point with 18 decimal places: divide by `1e18` for USD per dToken. `recent_slot` is the slot at which the oracle produced the quote. Compare it with the current slot before you trust `value`.
 
-### 8.2 Constants
+### 8.2 Constants and published feeds
 
 | Item | Value |
-|------|-------|
+|---|---|
 | Switchboard On-Demand mainnet program | exposed as `ON_DEMAND_MAINNET_PID` from `@switchboard-xyz/on-demand` |
 | Mainnet queue | `A43DyUGA7s8eXPxqEjJY6EBu1KKbNgfxF8h17VAHn13w` |
 | Switchboard quote program | `orac1eFjzWL5R3RbbdMV68K9H6TaCVVcL6LjvQQWAbz` |
 
-Live NAV feeds (canonical quote account = `OracleQuote.getCanonicalPubkey(queue, [feedId])`):
+Published NAV feeds: **none at the moment.** Each basket's `feedId`, canonical quote account and refresh cadence will be listed here as its feed goes live.
 
-| Basket | `feedId` (V2) | Canonical quote account |
-|---|---|---|
-| dBONK | `0x9a5cfb9568ca6c9eeb9833ea0fbfb2a9e163f50d78fad56411010d386ea0c19f` | `FjzDEtknQEfiN4cgynvXFeukH9DNEHTc7YFFchtRP1vP` |
-| dYIELD | `0x9f83c3e1f4f26a0c2646cd79cb9be1246b04552153b7170dd3e8ed4330d1d7d4` | `J3UmBcrkysdptEYVBWuC6WGwcycafpTTzb9N6q3iHJMz` |
-| dBIG4 *(stored as `dMULTI` in DB)* | `0x4484de63de1cc245b30467d5f3b28781eea4df1557d6a18909c55117e3a17969` | `5QPMhXYAVm4bHY9NsdyU2Zi4gbbJN3UrVSzAD6tEKq3K` |
-| dBOOMER | `0xde956aa58cfb0b01d5b11a8f0b555a1b3437b281f1efa50c250a43a29390dc9e` | `BLPfd4E6ZcCVpv5a6yA9tZQPrwfkkhWyqpAoV6Vjxezj` |
+> **The program's `["oracle", index]` account is not a NAV feed.** It holds the constituent prices DiversiFi's backend writes before deposits and withdrawals. The program stores those quotes without checking their signers against the Switchboard oracle set, so DiversiFi's admin key is their only guarantee. Do not use that account as a price source, and do not treat it as an oracle-verified quote.
 
-For baskets not listed above, contact DiversiFi for the current `feedId`; a public registry endpoint is on the roadmap. Note: the user-facing dBIG4 basket is stored under the symbol `dMULTI` in the DiversiFi DB, but the on-chain feed and quote account use the same canonical layout as every other basket — the symbol divergence is purely a metadata concern.
-
-### 8.3 Read pattern (TypeScript, no Switchboard SDK required)
+### 8.3 Read pattern with a staleness check (TypeScript, no Switchboard SDK required)
 
 ```typescript
 import { Connection, PublicKey } from "@solana/web3.js";
 
 const QUEUE = new PublicKey("A43DyUGA7s8eXPxqEjJY6EBu1KKbNgfxF8h17VAHn13w");
 const QUOTE_PROGRAM_ID = new PublicKey("orac1eFjzWL5R3RbbdMV68K9H6TaCVVcL6LjvQQWAbz");
-const DBONK_FEED_ID = "0x9a5cfb9568ca6c9eeb9833ea0fbfb2a9e163f50d78fad56411010d386ea0c19f";
+const FEED_ID = "0x..."; // from Section 8.2
+const MAX_AGE_SLOTS = 4_500n; // about 30 minutes
 
 // Derive the canonical quote account address.
 // Seeds: queue.toBytes() ++ feedHash bytes (32 bytes per feedId).
-const feedHashBytes = Buffer.from(DBONK_FEED_ID.replace(/^0x/, ""), "hex");
+const feedHashBytes = Buffer.from(FEED_ID.replace(/^0x/, ""), "hex");
 const [quoteAccount] = PublicKey.findProgramAddressSync(
     [Buffer.from(QUEUE.toBytes()), feedHashBytes],
     QUOTE_PROGRAM_ID
 );
 
-const accountInfo = await connection.getAccountInfo(quoteAccount, "confirmed");
-if (!accountInfo?.data) {
-    throw new Error("Quote account not yet bootstrapped — feed may be new or contact DiversiFi");
+// Read the account together with the slot it was observed at.
+const { context, value: account } = await connection.getAccountInfoAndContext(quoteAccount, "confirmed");
+if (!account?.data) {
+    throw new Error("Quote account not bootstrapped: this basket has no published feed");
+}
+const data = account.data;
+
+// 1. Reject a stale quote before reading its value (offsets from the layout in Section 8.1).
+const quoteEnd = 42 + data.readUInt16LE(40);
+if (data.subarray(quoteEnd - 4, quoteEnd).toString() !== "SBOD") {
+    throw new Error("Malformed quote account");
+}
+const recentSlot = data.readBigUInt64LE(quoteEnd - 13);
+const ageSlots = BigInt(context.slot) - recentSlot;
+if (ageSlots > MAX_AGE_SLOTS) {
+    throw new Error(`NAV quote is ${ageSlots} slots old; refusing to use it`);
 }
 
-// Locate the feedHash bytes in the account data; the value follows.
-const idx = accountInfo.data.indexOf(feedHashBytes);
-if (idx === -1) throw new Error("feedId not found in account data");
+// 2. The value follows the feedHash.
+const idx = data.indexOf(feedHashBytes);
+if (idx === -1 || idx + 48 > quoteEnd) throw new Error("feedId not found in account data");
 
 let value = 0n;
 for (let j = 0; j < 16; j++) {
-    value |= BigInt(accountInfo.data[idx + 32 + j]) << (BigInt(j) * 8n);
+    value |= BigInt(data[idx + 32 + j]) << (BigInt(j) * 8n);
 }
 const navUsd = Number(value) / 1e18;
-console.log(`dBONK NAV: $${navUsd}`);
 ```
 
-The same pattern works in Rust, Python, or any client that can fetch a Solana account — only the BigInt arithmetic and PDA derivation API differ by language. The Switchboard SDK exposes the equivalent of `findProgramAddressSync(...)` as `OracleQuote.getCanonicalPubkey(queue, [feedId])` if you prefer to add the dependency.
+Pick `MAX_AGE_SLOTS` for your use case. A slot is roughly 400 ms, so 150 slots is about one minute and 4,500 slots about thirty minutes. For anything that moves money, prefer the atomic crank in Section 8.4.
+
+The same pattern works in Rust, Python, or any client that can fetch a Solana account. The Switchboard SDK exposes the address derivation as `OracleQuote.getCanonicalPubkey(queue, [feedId])` if you prefer to add the dependency.
 
 ### 8.4 Atomic-crank pattern (for trade execution)
 
-The default-read pattern (§8.3) returns whatever value the account holds at read time. DiversiFi runs a low-cadence keeper that refreshes the account roughly every 15 minutes, so passive reads see a value that is at most ~15 minutes stale.
-
-If your use case can't tolerate that staleness — e.g. you're quoting a swap or routing through a dToken in your own AMM — include a "crank" in the same transaction that consumes the value. The on-chain quote account will be updated atomically with whatever else your tx does:
+A passive read returns whatever value the account last held, and nothing guarantees how recently that was. If you need a value produced for this moment, such as quoting a swap, routing through a dToken or valuing collateral, add a crank to your own transaction. The quote account is updated atomically with the rest of your transaction:
 
 ```typescript
 import { CrossbarClient } from "@switchboard-xyz/common";
@@ -310,7 +319,7 @@ const crossbar = new CrossbarClient("https://crossbar.switchboard.xyz");
 // Two instructions: Ed25519 verification + canonical-account update.
 const updateIxs = await queue.fetchManagedUpdateIxs(
     crossbar,
-    [DBONK_FEED_ID],
+    [FEED_ID],
     { payer: payerPubkey }
 );
 
@@ -320,49 +329,51 @@ const tx = new Transaction()
     .add(yourOwnInstruction);
 ```
 
-After this transaction confirms, `OracleQuote` holds the value the oracle just signed, and your instruction consumed exactly that value.
+After this transaction confirms, the quote account holds the value the oracle just signed, and your instruction consumed exactly that value.
 
-Cost & footprint per atomic crank:
+Cost and footprint per atomic crank:
 
 | Metric | Value | Notes |
 |---|---|---|
-| Tx fee added | 10,000 lamports | Standard 5,000-lamport base × 2 (signature + Ed25519 precompile) |
-| Compute units added | ~628 | Ed25519 runs as a native precompile, doesn't count |
-| Tx-bytes added | ~330 | Ed25519 ix data + quote-program ix data |
-| Latency added | ~2–5 s | Switchboard gateway round-trip during `fetchManagedUpdateIxs` |
+| Tx fee added | 10,000 lamports | Standard 5,000-lamport base x 2 (signature + Ed25519 precompile) |
+| Compute units added | ~628 | Ed25519 runs as a native precompile and doesn't count |
+| Tx bytes added | ~330 | Ed25519 ix data + quote-program ix data |
+| Latency added | ~2-5 s | Switchboard gateway round trip during `fetchManagedUpdateIxs` |
 
-The CU footprint is negligible. Tx-bytes can matter if you're already near the 1232-byte legacy tx limit — use a v0 transaction with lookup tables in that case.
+The CU footprint is negligible. Transaction bytes can matter if you're already near the 1,232-byte limit; use a v0 transaction with lookup tables in that case.
 
-### 8.5 Freshness guarantees
+### 8.5 Freshness
 
-| Mode | Guarantee |
+| Mode | What you get |
 |---|---|
-| Passive read (§8.3) | ≤ 15 minutes stale (DiversiFi keeper cadence; subject to change — contact us if you need a tighter SLA) |
-| Atomic crank (§8.4) | Zero staleness — value is signed by the oracle within the same tx |
+| Passive read (Section 8.3) | A value as old as its `recent_slot`. Enforce your own limit on every read. |
+| Atomic crank (Section 8.4) | A value the oracle produced for your transaction |
 
 ### 8.6 When to use which
 
 | Your use case | Recommendation |
 |---|---|
-| Dashboards, indexers, analytics | §8.3 — passive read, no SDK dep, ≤15 min freshness |
-| AMM / orderbook / routing / arbitrage where stale NAV is exploitable | §8.4 — atomic crank in your tx |
-| You need per-constituent token breakdowns or to avoid trusting a published NAV | Sections 1–7 — manual computation from on-chain state |
+| Dashboards, indexers, analytics | Section 8.3: passive read with a staleness limit that suits the display |
+| AMM, orderbook, routing, collateral or arbitrage where stale NAV is exploitable | Section 8.4: atomic crank in your transaction |
+| Per-constituent breakdowns, or no published feed for the basket | Sections 1-7: compute NAV from on-chain state |
 
 ### 8.7 Error handling
 
-- `accountInfo === null` — the canonical account has not yet been bootstrapped on-chain. The basket may not have a feed yet, or the first crank hasn't fired. Contact DiversiFi.
-- `accountInfo.data.indexOf(feedHashBytes) === -1` — the `feedId` you used does not match what's stored in this account. Double-check the `feedId`.
-- `fetchManagedUpdateIxs` throws — the Switchboard gateway is transiently unavailable, the feed is mis-configured, or the oracle subnet can't execute the underlying job. Retry once; if it persists, fall back to §8.3 or contact DiversiFi.
+* **Account missing** (`value === null`): the canonical account has not been bootstrapped. The basket has no published feed yet; compute NAV from on-chain state (Sections 1-7).
+* **Quote older than your limit**: do not use the value. Crank it (Section 8.4) or compute NAV from on-chain state.
+* **feedId not found in the account data**: the `feedId` does not match the account. Check it against Section 8.2.
+* **`fetchManagedUpdateIxs` throws**: the Switchboard gateway is transiently unavailable, the feed is misconfigured, or the oracles cannot execute the job. Retry once. If it persists, compute NAV from on-chain state and contact DiversiFi.
 
-### 8.8 Example TypeScript Implementation
+### 8.8 Example TypeScript implementation
 
-See `oracle_nav_read.ts` in this repository for a runnable example covering both the passive read (§8.3) and the atomic-crank pattern (§8.4):
+See `oracle_nav_read.ts` in this repository for a runnable example of both the passive read (Section 8.3) and the atomic crank (Section 8.4). It rejects stale quotes by default:
 
 ```bash
-npx tsx oracle_nav_read.ts
+FEED_ID=0x... npx tsx oracle_nav_read.ts
+npx tsx oracle_nav_read.test.ts   # staleness guard tests
 ```
 
-The passive read works with the base dependencies of this repo. The atomic-crank demo additionally requires the Switchboard SDK packages — install them only if you need that path:
+The passive read works with the base dependencies of this repo. The atomic-crank demo additionally requires the Switchboard SDK packages. Install them only if you need that path:
 
 ```bash
 pnpm add @switchboard-xyz/on-demand @switchboard-xyz/common
